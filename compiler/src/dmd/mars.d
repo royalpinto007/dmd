@@ -610,6 +610,14 @@ bool parseCommandLine(const ref Strings arguments, const size_t argc, ref Param 
     {
         const(char)* p = arguments[i];
         const(char)[] arg = p.toDString();
+
+        // Check if the argument is --sarif
+        if (arg == "--sarif")
+        {
+            params.sarif = true;  // set the SARIF flag to true if --sarif is passed
+            continue;  // move on to the next argument
+        }
+
         if (*p != '-')
         {
             if (target.os == Target.OS.Windows)

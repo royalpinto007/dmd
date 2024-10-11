@@ -35,6 +35,133 @@ enum ErrorKind
     message,
 }
 
+// Struct for SARIF Tool Information
+struct ToolInformation {
+    string name;
+    string toolVersion;
+
+    string toJson() nothrow {
+        return `{"name": "` ~ name ~ `", "version": "` ~ toolVersion ~ `"}`;
+    }
+}
+
+// Struct for SARIF Result
+struct Result {
+    string ruleId;  // Rule identifier
+    string message;  // Error message
+    PhysicalLocation location;  // Location where the error occurred
+
+    string toJson() nothrow {
+        return `{"ruleId": "` ~ ruleId ~ `", "message": "` ~ message ~ `", "location": ` ~ location.toJson() ~ `}`;
+    }
+}
+
+// Struct for Physical Location of the Error
+struct PhysicalLocation {
+    string uri;  // File path (URI)
+    int startLine;  // Line number where the error occurs
+    int startColumn;  // Column number where the error occurs
+
+    string toJson() nothrow {
+        return `{"artifactLocation": {"uri": "` ~ uri ~ `"}, "region": {"startLine": ` ~ intToString(startLine) ~ `, "startColumn": ` ~ intToString(startColumn) ~ `}}`;
+    }
+}
+
+// SARIF Report Struct
+struct SarifReport {
+    ToolInformation tool;  // Information about the tool
+    Invocation invocation;  // Information about the execution
+    Result[] results;  // List of results (errors, warnings, etc.)
+
+    string toJson() nothrow {
+        string resultsJson = "[" ~ results[0].toJson();
+        foreach (result; results[1 .. $]) {
+            resultsJson ~= ", " ~ result.toJson();
+        }
+        resultsJson ~= "]";
+
+        return `{"tool": ` ~ tool.toJson() ~ `, "invocation": ` ~ invocation.toJson() ~ `, "results": ` ~ resultsJson ~ `}`;
+    }
+}
+
+// Struct for Invocation Information
+struct Invocation {
+    bool executionSuccessful;
+
+    string toJson() nothrow {
+        return `{"executionSuccessful": ` ~ (executionSuccessful ? "true" : "false") ~ `}`;
+    }
+}
+
+// Function to replace writeln with fprintf for printing to stdout
+void printToStdout(string message) nothrow {
+    fprintf(stdout, "%.*s\n", cast(int)message.length, message.ptr);  // Cast to int
+}
+
+void generateSarifReport(const ref Loc loc, const(char)* format, va_list ap, ErrorKind kind) nothrow
+{
+    string toolVersion = global.versionString();  // Retrieve dynamic version
+    ToolInformation tool = ToolInformation("DMD", toolVersion);
+    
+    // Format the error message
+    string formattedMessage = formatErrorMessage(format, ap);
+
+    // Directly print the SARIF JSON structure to stdout
+    fprintf(stdout, "{\n");
+
+    // Write the invocation status
+    fprintf(stdout, "  \"invocation\": {\n");
+    fprintf(stdout, "    \"executionSuccessful\": false\n");
+    fprintf(stdout, "  },\n");
+
+    // Start the results array
+    fprintf(stdout, "  \"results\": [\n    {\n");
+
+    // Write location in SARIF format (artifactLocation + region)
+    fprintf(stdout, "      \"location\": {\n");
+    fprintf(stdout, "        \"artifactLocation\": {\n");
+    fprintf(stdout, "          \"uri\": \"%s\"\n", loc.filename.toDString().ptr);
+    fprintf(stdout, "        },\n");
+    fprintf(stdout, "        \"region\": {\n");
+    fprintf(stdout, "          \"startLine\": %d,\n", loc.linnum);
+    fprintf(stdout, "          \"startColumn\": %d\n", loc.charnum);
+    fprintf(stdout, "        }\n");
+    fprintf(stdout, "      },\n");
+
+    // Write message and ruleId
+    fprintf(stdout, "      \"message\": \"%s\",\n", formattedMessage.ptr);
+    fprintf(stdout, "      \"ruleId\": \"DMD\"\n");
+
+    // Close results and array
+    fprintf(stdout, "    }\n  ],\n");
+
+    // Write tool information with the dynamic version
+    fprintf(stdout, "  \"tool\": {\n");
+    fprintf(stdout, "    \"name\": \"DMD\",\n");
+    fprintf(stdout, "    \"version\": \"%s\"\n", toolVersion.ptr);
+    fprintf(stdout, "  }\n");
+
+    // Close JSON structure
+    fprintf(stdout, "}\n");
+}
+
+// Helper function to format error messages
+string formatErrorMessage(const(char)* format, va_list ap) nothrow
+{
+    char[2048] buffer;  // Increased buffer size to handle longer messages
+    import core.stdc.stdio : vsnprintf;
+    vsnprintf(buffer.ptr, buffer.length, format, ap);
+    return buffer[0 .. buffer.length].dup;
+}
+
+// Function to convert int to string
+string intToString(int value) nothrow {
+    char[32] buffer;
+    import core.stdc.stdio : sprintf;
+    sprintf(buffer.ptr, "%d", value);
+    return buffer[0 .. buffer.length].dup;
+}
+
 /***************************
  * Error message sink for D compiler.
  */
@@ -473,6 +600,12 @@ extern (C++) void verrorReport(const SourceLoc loc, const(char)* format, va_list
         {
             info.headerColor = Classification.error;
             verrorPrint(format, ap, info);
+
+            // Hook: Generate SARIF report only if the --sarif flag is set
+            if (global.params.sarif)
+            {
+                generateSarifReport(info.loc, format, ap, info.kind);
+            }
             if (global.params.v.errorLimit && global.errors >= global.params.v.errorLimit)
             {
                 fprintf(stderr, "error limit (%d) reached, use `-verrors=0` to show all\n", global.params.v.errorLimit);
@@ -502,6 +635,12 @@ extern (C++) void verrorReport(const SourceLoc loc, const(char)* format, va_list
                 {
                     info.headerColor = Classification.deprecation;
                     verrorPrint(format, ap, info);
+
+                    // Hook: Generate SARIF report only if the --sarif flag is set
+                    if (global.params.sarif)
+                    {
+                        generateSarifReport(info.loc, format, ap, info.kind);
+                    }
                 }
             }
             else
@@ -518,6 +657,13 @@ extern (C++) void verrorReport(const SourceLoc loc, const(char)* format, va_list
             {
                 info.headerColor = Classification.warning;
                 verrorPrint(format, ap, info);
+
+                // Hook: Generate SARIF report only if the --sarif flag is set
+                if (global.params.sarif)
+                {
+                    generateSarifReport(info.loc, format, ap, info.kind);
+                }
+
                 if (global.params.warnings == DiagnosticReporting.error)
                     global.warnings++;
             }
@@ -533,6 +679,12 @@ extern (C++) void verrorReport(const SourceLoc loc, const(char)* format, va_list
         {
             info.headerColor = Classification.tip;
             verrorPrint(format, ap, info);
+
+            // Hook: Generate SARIF report only if the --sarif flag is set
+            if (global.params.sarif)
+            {
+                generateSarifReport(info.loc, format, ap, info.kind);
+            }
         }
         break;
 
@@ -547,6 +699,12 @@ extern (C++) void verrorReport(const SourceLoc loc, const(char)* format, va_list
         fputs(tmp.peekChars(), stdout);
         fputc('\n', stdout);
         fflush(stdout);     // ensure it gets written out in case of compiler aborts
+
+        // Hook: Generate SARIF report only if the --sarif flag is set
+        if (global.params.sarif)
+        {
+            generateSarifReport(info.loc, format, ap, info.kind);
+        }
         break;
     }
 }
